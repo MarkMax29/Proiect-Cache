@@ -1,0 +1,143 @@
+`timescale 1ns / 1ps
+
+module cache_controller_tb;
+
+    reg clk;
+    reg reset;
+
+    reg         read;
+    reg         write;
+    reg  [31:0] addr;
+    reg  [31:0] wdata;
+    wire [31:0] rdata;
+    wire        ready;
+
+    cache_controller uut (
+        .clk   (clk),
+        .reset (reset),
+        .read  (read),
+        .write (write),
+        .addr  (addr),
+        .wdata (wdata),
+        .rdata (rdata),
+        .ready (ready)
+    );
+
+    wire [2:0] fsm_state = uut.state;
+
+    initial clk = 0;
+    always #5 clk = ~clk;
+
+    integer total_req;
+    integer hit_count;
+    integer total_cycles;
+    integer start_time;
+
+    always @(posedge clk) begin
+        if (start_time >= 0 && ready) begin
+            total_cycles = total_cycles + (($time - start_time) / 10);
+            start_time   = -1;
+        end
+    end
+
+    always @(posedge clk) begin
+        if (ready) begin
+            total_req = total_req + 1;
+            if (read && rdata !== 32'b0)
+                hit_count = hit_count + 1;
+        end
+    end
+
+    always @(posedge clk) begin
+        $write("Time=%0t | State=", $time);
+        case (fsm_state)
+            uut.IDLE       : $write("IDLE       ");
+            uut.READ_HIT   : $write("READ_HIT   ");
+            uut.READ_MISS  : $write("READ_MISS  ");
+            uut.WRITE_HIT  : $write("WRITE_HIT  ");
+            uut.WRITE_MISS : $write("WRITE_MISS ");
+            uut.EVICT      : $write("EVICT      ");
+            default        : $write("UNKNOWN    ");
+        endcase
+        $write(" | Addr=0x%08h", addr);
+        $write(" | Rdata=0x%08h", rdata);
+        $write(" | Ready=%b", ready);
+        $write("\n");
+    end
+
+    task do_read(input [31:0] a);
+    begin
+        @(posedge clk);
+        read       = 1;
+        write      = 0;
+        addr       = a;
+        start_time = $time;
+        @(posedge clk);
+        read = 0;
+        wait (ready);
+        $display("[%-0t] READ(0x%08h) => 0x%08h", $time, a, rdata);
+    end
+    endtask
+
+    task do_write(input [31:0] a, input [31:0] d);
+    begin
+        @(posedge clk);
+        write      = 1;
+        read       = 0;
+        addr       = a;
+        wdata      = d;
+        start_time = $time;
+        @(posedge clk);
+        write = 0;
+        wait (ready);
+        $display("[%-0t] WRITE(0x%08h, 0x%08h)", $time, a, d);
+    end
+    endtask
+
+    initial begin
+        reset       = 1;
+        read        = 0;
+        write       = 0;
+        addr        = 32'b0;
+        wdata       = 32'b0;
+        total_req   = 0;
+        hit_count   = 0;
+        total_cycles= 0;
+        start_time  = -1;
+        #20;
+        reset = 0;
+
+        $display("\n=== STARTING CACHE CONTROLLER TEST ===\n");
+
+        do_write(32'h0000_0010, 32'hDEAD_BEEF);
+
+        do_read(32'h0000_0010);
+
+        do_read(32'h0000_2000);
+
+        do_write(32'h0000_2000, 32'h1234_5678);
+
+        do_write(32'h0000_4000, 32'hAAAA_AAAA);
+        do_write(32'h0000_6000, 32'hBBBB_BBBB);
+
+        do_write(32'h0000_8000, 32'hCAFEBABE);
+
+        $display("\n-- VERIFY EVICTION: READ from possibly evicted 0x0000_0000 --");
+        do_read(32'h0000_0000);
+
+        do_read(32'h0000_8000);
+
+        do_write(32'h0000_0040, 32'h1111_1111);  // WRITE_MISS (tag=0, set=1)
+        do_read (32'h0000_0040);                 // READ_HIT
+        do_read (32'h0000_0840);                 // READ_MISS (tag=1, set=1)
+        do_write(32'h0000_0840, 32'h2222_2222);  // WRITE_HIT
+
+        #20;
+        $display("\n=== TEST COMPLETE ===");
+        $display("Total Requests : %0d", total_req);
+        $display("Hit Count      : %0d", hit_count);
+        $display("Hit Rate       : %0f", hit_count / (1.0 * total_req));
+        $display("Avg. Latency   : %0f cycles", total_cycles / (1.0 * total_req));
+        $finish;
+    end
+endmodule
